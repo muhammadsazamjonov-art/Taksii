@@ -1,0 +1,8 @@
+{
+  "name": "taksi-dunyo",
+  "version": "1.0.0",
+  "description": "Dunyo xaritali taksi xizmati: yo'lovchi, haydovchi va admin panel",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}

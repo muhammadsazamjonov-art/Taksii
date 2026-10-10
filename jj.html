@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Taksi — dunyo bo‘ylab</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="map"></div>
+<div class="top">
+  <div class="brand"><span class="lamp"></span>Taksi</div>
+  <span id="zb" class="chip hide"></span>
+  <span class="sp"></span>
+  <button id="acct" class="chip">Kirish</button>
+</div>
+<section class="sheet" id="sheet"></section>
+<div id="modal"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="/common.js"></script>
+<script>
+const S = { zones: [], me: null, from: null, to: null, active: 'from', dist: 0, line: null, ride: null, plan: true };
+const map = makeMap('map');
+let mkA, mkB, routeLine, drvMk, pollT, rid = 0;
+
+/* ---------- Boshlash ---------- */
+(async () => {
+  const z = await api('zones'); S.zones = z.ok ? z.data : [];
+  drawZones(map, S.zones);
+  if (S.zones.length) map.fitBounds(L.latLngBounds(S.zones.map(z => [z.lat, z.lng])).pad(0.3));
+  if (getTok()) { const m = await api('me'); if (m.ok) S.me = m.data; else setTok(''); }
+  head(); await loadRide(); view();
+})();
+map.on('click', e => setPoint({ lat: e.latlng.lat, lng: e.latlng.lng }));
+
+function head() { $('acct').textContent = S.me ? '👤 ' + S.me.name.split(' ')[0] : 'Kirish'; }
+$('acct').onclick = () => S.me ? accountModal() : authModal();
+
+/* ---------- Nuqtalar ---------- */
+async function setPoint(p, key) {
+  if (S.ride) return;
+  key = key || S.active;
+  S[key] = { lat: p.lat, lng: p.lng, addr: p.addr || '' };
+  if (!p.addr) { S[key].addr = '…'; fillInputs(); const a = await geoReverse(p); S[key].addr = a || p.lat.toFixed(4) + ', ' + p.lng.toFixed(4); }
+  if (key === 'from' && !S.to) S.active = 'to';
+  fillInputs(); markers(); await calc();
+}
+function markers() {
+  [['from', 'a', 'A'], ['to', 'b', 'B']].forEach(([k, c, t]) => {
+    const old = k === 'from' ? mkA : mkB; if (old) map.removeLayer(old);
+    if (!S[k]) { k === 'from' ? mkA = null : mkB = null; return; }
+    const m = L.marker([S[k].lat, S[k].lng], { icon: pinIcon(c, t), draggable: true }).addTo(map);
+    m.on('dragend', () => { const l = m.getLatLng(); setPoint({ lat: l.lat, lng: l.lng }, k); });
+    k === 'from' ? mkA = m : mkB = m;
+  });
+}
+async function calc() {
+  const my = ++rid; S.dist = 0;
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  zoneBadge();
+  if (S.from && S.to) {
+    const r = await route(S.from, S.to); if (my !== rid) return;
+    S.dist = r.km; routeLine = L.polyline(r.line, { color: '#ffc400', weight: 5, opacity: .9 }).addTo(map);
+    map.fitBounds(routeLine.getBounds().pad(0.25));
+  } else if (S.from) map.setView([S.from.lat, S.from.lng], Math.max(map.getZoom(), 13));
+  info();
+}
+function zoneBadge() {
+  const z = S.from && zoneAt(S.zones, S.from), b = $('zb');
+  if (!S.from) return b.classList.add('hide');
+  b.classList.remove('hide'); b.className = 'chip ' + (z ? 'ok' : 'warn'); b.textContent = z ? '📍 ' + z.name : 'Xizmat hududidan tashqari';
+}
+
+/* ---------- Panel ---------- */
+function view() { S.ride ? rideView() : planView(); }
+function planView() {
+  $('sheet').innerHTML = `
+  <div class="stop-row"><span class="dot a"></span><input class="in" id="fa" placeholder="Qayerdan? (manzil yozing yoki xaritada bosing)" autocomplete="off"><button class="btn ghost sm" id="gps" title="Mening joylashuvim">◎</button></div>
+  <div class="stop-row"><span class="dot b"></span><input class="in" id="fb" placeholder="Qayerga?" autocomplete="off"></div>
+  <div id="res"></div><div id="info"></div>`;
+  ['fa', 'fb'].forEach(id => {
+    const k = id === 'fa' ? 'from' : 'to', el = $(id);
+    el.onfocus = () => { S.active = k; fillInputs(); };
+    let t; el.oninput = () => { clearTimeout(t); const q = el.value.trim(); if (q.length < 3) { $('res').innerHTML = ''; return; } t = setTimeout(async () => { const r = await geoSearch(q); showRes(r, k); }, 700); };
+  });
+  $('gps').onclick = locate;
+  fillInputs(); info();
+}
+function fillInputs() {
+  const a = $('fa'), b = $('fb'); if (!a || !b) return;
+  if (document.activeElement !== a) a.value = S.from ? S.from.addr : '';
+  if (document.activeElement !== b) b.value = S.to ? S.to.addr : '';
+  a.classList.toggle('on', S.active === 'from'); b.classList.toggle('on', S.active === 'to');
+}
+function showRes(list, k) {
+  const el = $('res'); if (!el) return;
+  el.innerHTML = list.length ? '<div class="res">' + list.map((x, i) => `<button data-i="${i}">${esc(x.addr)}</button>`).join('') + '</div>' : '<p class="mut">Hech narsa topilmadi. Xaritadan tanlang.</p>';
+  el.querySelectorAll('button').forEach(bt => bt.onclick = () => { const x = list[+bt.dataset.i]; el.innerHTML = ''; document.activeElement.blur(); setPoint(x, k); map.setView([x.lat, x.lng], 14); });
+}
+function locate() {
+  if (!navigator.geolocation) return toast('Brauzer joylashuvni qo‘llamaydi', 1);
+  navigator.geolocation.getCurrentPosition(p => { S.active = 'from'; setPoint({ lat: p.coords.latitude, lng: p.coords.longitude }, 'from'); map.setView([p.coords.latitude, p.coords.longitude], 15); }, () => toast('Joylashuvga ruxsat bering', 1), { enableHighAccuracy: true, timeout: 10000 });
+}
+function info() {
+  const el = $('info'); if (!el) return;
+  if (!S.from || !S.to) { el.innerHTML = '<p class="mut" style="margin:2px 0">Ikkala nuqtani tanlang: yo‘nalish va narx shu yerda chiqadi.</p>'; return; }
+  const z = zoneAt(S.zones, S.from);
+  if (!z) { el.innerHTML = '<div class="card"><b>Bu hududda xizmat hali yo‘q</b><div class="mut">Xaritadagi sariq doiralar — xizmat hududlari. Qayerdan nuqtasini shu doira ichida tanlang.</div></div>'; return; }
+  if (!S.dist) { el.innerHTML = '<p class="mut">Yo‘l hisoblanmoqda…</p>'; return; }
+  const d = Math.round(S.dist * 10) / 10, p = priceOf(z, d);
+  el.innerHTML = `<div class="fare"><div class="between"><div><div class="mut">${esc(z.name)} · ${d} km</div><div class="price">${fmt(p, z.cur)}</div></div><div class="mut" style="text-align:right">Boshlang‘ich ${fmt(z.base, z.cur)}<br>+ ${fmt(z.perKm, z.cur)} / km</div></div></div>
+  <button class="btn wide" id="order">Taksi chaqirish</button>`;
+  $('order').onclick = order;
+}
+async function order() {
+  if (!S.me) return authModal(order);
+  const b = $('order'); b.disabled = true;
+  const r = await api('ride', 'POST', { from: S.from, to: S.to, distKm: S.dist });
+  if (!r.ok) { b.disabled = false; return toast(r.error, 1); }
+  S.ride = r.data; view(); startPoll();
+}
+
+/* ---------- Faol buyurtma ---------- */
+async function loadRide() {
+  if (!S.me) return;
+  const r = await api('ride/active'); S.ride = r.ok ? r.data.ride : null;
+  if (S.ride) { S.from = S.ride.from; S.to = S.ride.to; markers(); const rt = await route(S.from, S.to); routeLine = L.polyline(rt.line, { color: '#ffc400', weight: 5, opacity: .9 }).addTo(map); map.fitBounds(routeLine.getBounds().pad(0.25)); startPoll(); }
+}
+function startPoll() { clearInterval(pollT); pollT = setInterval(tick, 3000); }
+async function tick() {
+  const r = await api('ride/active'); if (!r.ok) return;
+  const old = S.ride && S.ride.status; S.ride = r.data.ride;
+  if (!S.ride) { clearInterval(pollT); return resetPlan(); }
+  if (old !== S.ride.status) { rideView(); if (S.ride.status === 'accepted') toast('Haydovchi topildi 🚕'); }
+  else if (S.ride.driver) updDrv();
+  if (!['searching', 'accepted', 'arrived', 'ontrip'].includes(S.ride.status)) clearInterval(pollT);
+}
+function updDrv() {
+  const d = S.ride && S.ride.driver; if (!d || d.lat == null || !['accepted', 'arrived', 'ontrip'].includes(S.ride.status)) { if (drvMk) { map.removeLayer(drvMk); drvMk = null; } return; }
+  if (!drvMk) drvMk = L.marker([d.lat, d.lng], { icon: carIcon() }).addTo(map); else drvMk.setLatLng([d.lat, d.lng]);
+}
+function rideView() {
+  const r = S.ride, st = r.status, live = ['searching', 'accepted', 'arrived', 'ontrip'].includes(st), d = r.driver;
+  $('sheet').innerHTML = `
+  <div class="status">${live ? '<span class="pulse"></span>' : st === 'done' ? '✅' : '✖️'} ${STATUS[st]}</div>
+  ${st === 'cancelled' && r.why ? `<div class="mut">${esc(r.why)}</div>` : ''}
+  ${d ? `<div class="card"><div class="between"><div><b>${esc(d.name)}</b><div class="mut">${esc(d.car)} · <b style="color:var(--paper)">${esc(d.plate)}</b></div></div><a class="btn sm go" style="text-decoration:none" href="tel:${esc(d.phone)}">Qo‘ng‘iroq</a></div></div>` : ''}
+  <div class="card"><div class="mut">Qayerdan</div>${esc(r.from.addr)}<div class="mut" style="margin-top:6px">Qayerga</div>${esc(r.to.addr)}
+  <div class="between" style="margin-top:8px"><span class="mut">${esc(r.zone)} · ${r.distKm} km</span><span class="price" style="font-size:22px">${fmt(r.price, r.cur)}</span></div></div>
+  ${['searching', 'accepted', 'arrived'].includes(st) ? '<button class="btn stop wide" id="cx">Buyurtmani bekor qilish</button>' : ''}
+  ${!live ? '<button class="btn wide" id="nw">Yangi buyurtma</button>' : ''}`;
+  if ($('cx')) $('cx').onclick = async () => { if (!confirm('Bekor qilinsinmi?')) return; const x = await api('ride/cancel', 'POST'); if (!x.ok) return toast(x.error, 1); tick(); };
+  if ($('nw')) $('nw').onclick = async () => { await api('ride/close', 'POST'); resetPlan(); };
+  updDrv();
+}
+function resetPlan() {
+  S.ride = null; S.from = S.to = null; S.active = 'from'; S.dist = 0; rid++;
+  [mkA, mkB, routeLine, drvMk].forEach(l => l && map.removeLayer(l)); mkA = mkB = routeLine = drvMk = null;
+  zoneBadge(); view();
+}
+
+/* ---------- Kirish / ro'yxatdan o'tish ---------- */
+function closeModal() { $('modal').innerHTML = ''; }
+function authModal(after) {
+  let reg = false;
+  const draw = () => {
+    $('modal').innerHTML = `<div class="bg" id="bg"><div class="modal">
+    <div class="between"><h2>${reg ? 'Ro‘yxatdan o‘tish' : 'Kirish'}</h2><button class="btn ghost sm" id="x">✕</button></div>
+    ${reg ? '<input class="in" id="nm" placeholder="Ismingiz" autocomplete="name">' : ''}
+    <input class="in" id="ph" placeholder="Telefon (+998 ...)" inputmode="tel" autocomplete="tel">
+    <input class="in" id="pw" type="password" placeholder="Parol (kamida 4 belgi)" autocomplete="${reg ? 'new-password' : 'current-password'}">
+    <button class="btn" id="go">${reg ? 'Ro‘yxatdan o‘tish' : 'Kirish'}</button>
+    <button class="btn ghost" id="sw">${reg ? 'Akkauntim bor' : 'Yangi akkaunt yaratish'}</button>
+    <a href="/driver" class="mut">Haydovchi bo‘lib ishlamoqchimisiz?</a></div></div>`;
+    $('x').onclick = closeModal; $('bg').onclick = e => { if (e.target.id === 'bg') closeModal(); };
+    $('sw').onclick = () => { reg = !reg; draw(); };
+    $('go').onclick = async () => {
+      const body = { phone: $('ph').value, pw: $('pw').value, role: 'passenger' }; if (reg) body.name = $('nm').value;
+      const r = await api(reg ? 'signup' : 'login', 'POST', body); if (!r.ok) return toast(r.error, 1);
+      if (r.data.user.role !== 'passenger') return toast('Bu haydovchi akkaunti. /driver sahifasidan kiring', 1);
+      setTok(r.data.token); S.me = r.data.user; head(); closeModal(); await loadRide(); view(); if (after && !S.ride) after();
+    };
+  };
+  draw();
+}
+async function accountModal() {
+  $('modal').innerHTML = `<div class="bg" id="bg"><div class="modal"><div class="between"><div><h2>${esc(S.me.name)}</h2><div class="mut">${esc(S.me.phone)}</div></div><button class="btn ghost sm" id="x">✕</button></div>
+  <h3>Oxirgi safarlar</h3><div id="hist" class="mut">Yuklanmoqda…</div><button class="btn stop" id="lo">Chiqish</button></div></div>`;
+  $('x').onclick = closeModal; $('bg').onclick = e => { if (e.target.id === 'bg') closeModal(); };
+  $('lo').onclick = () => { setTok(''); S.me = null; clearInterval(pollT); closeModal(); head(); resetPlan(); };
+  const r = await api('rides/mine'); const h = $('hist'); if (!h) return;
+  h.innerHTML = r.ok && r.data.length ? r.data.map(x => `<div class="card" style="margin-bottom:6px;color:var(--paper)"><div class="between"><b>${fmt(x.price, x.cur)}</b><span class="pill ${x.status === 'done' ? 'g' : x.status === 'cancelled' ? 'r' : 'y'}">${STATUS[x.status]}</span></div><div class="mut">${esc(x.from.addr)} → ${esc(x.to.addr)}<br>${hm(x.t)}</div></div>`).join('') : 'Hozircha safarlar yo‘q';
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Taksi — haydovchi</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="auth" class="center hide"></div>
+<div id="app" class="hide" style="height:100%">
+  <div id="map"></div>
+  <div class="top">
+    <div class="brand"><span class="lamp"></span>Haydovchi</div>
+    <span class="sp"></span>
+    <button id="onl" class="chip">Oflayn</button>
+    <button id="out" class="chip">Chiqish</button>
+  </div>
+  <section class="sheet" id="sheet"></section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="/common.js"></script>
+<script>
+let me = null, map, meMk, pos = null, manual = false, jobs = null, lastSig = '', pollT, locT, watch, routeFor = 0, layers = [], prevAvail = 0, zonesDrawn = false;
+
+(async () => {
+  if (getTok()) { const m = await api('me'); if (m.ok && m.data.role === 'driver') { me = m.data; return start(); } setTok(''); }
+  authView();
+})();
+
+/* ---------- Kirish ---------- */
+function authView() {
+  $('app').classList.add('hide'); const a = $('auth'); a.classList.remove('hide');
+  let reg = false;
+  const draw = () => {
+    a.innerHTML = `<div class="modal" style="max-width:420px">
+    <div class="brand" style="align-self:flex-start"><span class="lamp"></span>Haydovchi</div>
+    <h2>${reg ? 'Haydovchi bo‘lib ro‘yxatdan o‘tish' : 'Haydovchi kirishi'}</h2>
+    ${reg ? '<input class="in" id="nm" placeholder="Ism familiya"><input class="in" id="car" placeholder="Mashina (masalan: Chevrolet Cobalt, oq)"><input class="in" id="pl" placeholder="Davlat raqami (01 A 123 AA)">' : ''}
+    <input class="in" id="ph" placeholder="Telefon (+998 ...)" inputmode="tel"><input class="in" id="pw" type="password" placeholder="Parol">
+    <button class="btn" id="go">${reg ? 'Ro‘yxatdan o‘tish' : 'Kirish'}</button>
+    <button class="btn ghost" id="sw">${reg ? 'Akkauntim bor' : 'Yangi haydovchi akkaunti'}</button>
+    ${reg ? '<p class="mut">Ro‘yxatdan o‘tgach admin sizni tasdiqlaydi, shundan keyin buyurtmalar chiqadi.</p>' : ''}
+    <a href="/" class="mut">← Yo‘lovchi sahifasi</a></div>`;
+    $('sw').onclick = () => { reg = !reg; draw(); };
+    $('go').onclick = async () => {
+      const b = { phone: $('ph').value, pw: $('pw').value, role: 'driver' };
+      if (reg) { b.name = $('nm').value; b.car = $('car').value; b.plate = $('pl').value; }
+      const r = await api(reg ? 'signup' : 'login', 'POST', b); if (!r.ok) return toast(r.error, 1);
+      if (r.data.user.role !== 'driver') return toast('Bu yo‘lovchi akkaunti. Bosh sahifadan kiring', 1);
+      setTok(r.data.token); me = r.data.user; a.classList.add('hide'); start();
+    };
+  };
+  draw();
+}
+$('out').onclick = async () => { await api('driver/online', 'POST', { online: false }); setTok(''); location.reload(); };
+
+/* ---------- Ishga tushirish ---------- */
+function start() {
+  $('app').classList.remove('hide');
+  map = makeMap('map');
+  api('zones').then(z => { if (z.ok) { drawZones(map, z.data); if (!pos) map.fitBounds(L.latLngBounds(z.data.map(x => [x.lat, x.lng])).pad(.3)); } });
+  map.on('click', e => { if (manual) setPos(e.latlng.lat, e.latlng.lng); });
+  $('onl').onclick = toggle;
+  if (navigator.geolocation) watch = navigator.geolocation.watchPosition(p => { manual = false; setPos(p.coords.latitude, p.coords.longitude, true); }, () => { manual = true; toast('Joylashuv topilmadi. Xaritada o‘z joyingizni bosing', 1); }, { enableHighAccuracy: true, maximumAge: 5000 });
+  else { manual = true; }
+  pollT = setInterval(poll, 3000); locT = setInterval(sendLoc, 5000); poll();
+}
+function setPos(lat, lng, center) {
+  const first = !pos; pos = { lat, lng };
+  if (!meMk) meMk = L.marker([lat, lng], { icon: carIcon(), zIndexOffset: 1000 }).addTo(map); else meMk.setLatLng([lat, lng]);
+  if (first) { map.setView([lat, lng], 13); sendLoc(); }
+}
+async function sendLoc() { if (pos && me && me.online) await api('driver/loc', 'POST', pos); }
+async function toggle() {
+  if (!pos) return toast('Avval joylashuvingiz aniqlansin', 1);
+  const r = await api('driver/online', 'POST', { online: !me.online }); if (!r.ok) return toast(r.error, 1);
+  me = r.data; await sendLoc(); await poll(true);
+}
+
+/* ---------- Buyurtmalar ---------- */
+async function poll(force) {
+  const r = await api('driver/jobs'); if (!r.ok) { if (r.status === 401) { setTok(''); location.reload(); } return; }
+  jobs = r.data; me = jobs.user;
+  $('onl').textContent = me.online ? '● Onlayn' : 'Oflayn'; $('onl').className = 'chip ' + (me.online ? 'ok' : '');
+  if (jobs.available.length > prevAvail) beep(); prevAvail = jobs.available.length;
+  const sig = JSON.stringify([jobs.active, jobs.available.map(x => x.id + ':' + x.pickupKm), me.online, me.approved, jobs.stats]);
+  if (sig !== lastSig || force) { lastSig = sig; draw(); }
+}
+function clearLayers() { layers.forEach(l => map.removeLayer(l)); layers = []; }
+function draw() {
+  const sh = $('sheet'), st = jobs.stats, a = jobs.active;
+  const stats = `<div class="between mut"><span>Bugun: <b style="color:var(--paper)">${st.todayTrips}</b> safar</span><span><b style="color:var(--lamp)">${fmt(st.today)}</b></span></div>`;
+  clearLayers();
+  if (!me.approved) { sh.innerHTML = `<div class="card"><b>Admin tasdiqlashini kuting</b><div class="mut">Akkauntingiz ko‘rib chiqilmoqda. Tasdiqlangach “Oflayn” tugmasi ishlaydi va buyurtmalar ko‘rinadi.</div></div>`; return; }
+  if (a) { activeView(a, stats); return; }
+  if (!me.online) { sh.innerHTML = `${stats}<div class="card"><b>Siz oflaynsiz</b><div class="mut">Buyurtma olish uchun yuqoridagi “Oflayn” tugmasini bosing.</div></div>`; return; }
+  const av = jobs.available;
+  sh.innerHTML = `${stats}<h3>Yaqin atrofdagi buyurtmalar</h3>` + (av.length ? av.map(r => `<div class="card"><div class="between"><span class="price" style="font-size:22px">${fmt(r.price, r.cur)}</span><span class="mut">${r.distKm} km · sizdan ${r.pickupKm} km</span></div>
+  <div style="margin:6px 0"><span class="mut">A</span> ${esc(r.from.addr)}<br><span class="mut">B</span> ${esc(r.to.addr)}</div><button class="btn go wide" data-id="${r.id}">Qabul qilish</button></div>`).join('') : '<p class="mut">Hozircha buyurtma yo‘q. Yangi buyurtma kelsa, signal chalinadi.</p>');
+  sh.querySelectorAll('[data-id]').forEach(b => b.onclick = async () => { b.disabled = true; const x = await api('driver/accept', 'POST', { id: +b.dataset.id }); if (!x.ok) toast(x.error, 1); poll(true); });
+  av.forEach(r => layers.push(L.marker([r.from.lat, r.from.lng], { icon: pinIcon('a', 'A') }).addTo(map)));
+}
+const NEXT = { accepted: 'Yetib keldim', arrived: 'Safarni boshlash', ontrip: 'Safarni yakunlash' };
+async function activeView(a, stats) {
+  const target = a.status === 'ontrip' ? a.to : a.from;
+  $('sheet').innerHTML = `${stats}<div class="status"><span class="pulse"></span>${STATUS[a.status]}</div>
+  <div class="card"><div class="between"><div><b>${esc(a.passenger.name)}</b><div class="mut">${esc(a.passenger.phone)}</div></div><a class="btn sm go" style="text-decoration:none" href="tel:${esc(a.passenger.phone)}">Qo‘ng‘iroq</a></div></div>
+  <div class="card"><span class="mut">A</span> ${esc(a.from.addr)}<br><span class="mut">B</span> ${esc(a.to.addr)}<div class="between" style="margin-top:8px"><span class="mut">${a.distKm} km</span><span class="price" style="font-size:22px">${fmt(a.price, a.cur)}</span></div></div>
+  <a class="btn ghost wide" style="text-decoration:none;text-align:center" target="_blank" rel="noopener" href="${navLink(target)}">Navigatsiya (${a.status === 'ontrip' ? 'B nuqta' : 'A nuqta'})</a>
+  <button class="btn go wide" id="nx">${NEXT[a.status]}</button>
+  ${a.status !== 'ontrip' ? '<button class="btn stop wide" id="cn">Buyurtmadan voz kechish</button>' : ''}`;
+  $('nx').onclick = async () => { $('nx').disabled = true; const r = await api('driver/status', 'POST', { id: a.id }); if (!r.ok) toast(r.error, 1); else if (r.data.status === 'done') toast('Safar yakunlandi ✅'); poll(true); };
+  if ($('cn')) $('cn').onclick = async () => { if (!confirm('Voz kechilsinmi? Buyurtma boshqa haydovchiga o‘tadi.')) return; const r = await api('driver/cancel', 'POST', { id: a.id }); if (!r.ok) toast(r.error, 1); poll(true); };
+  layers.push(L.marker([a.from.lat, a.from.lng], { icon: pinIcon('a', 'A') }).addTo(map), L.marker([a.to.lat, a.to.lng], { icon: pinIcon('b', 'B') }).addTo(map));
+  const my = ++routeFor, rt = await route(a.from, a.to); if (my !== routeFor) return;
+  const ln = L.polyline(rt.line, { color: '#ffc400', weight: 5, opacity: .9 }).addTo(map); layers.push(ln); map.fitBounds(ln.getBounds().pad(.25));
+}
+function beep() {
+  try { const c = new (window.AudioContext || window.webkitAudioContext)(), o = c.createOscillator(), g = c.createGain(); o.connect(g); g.connect(c.destination); o.frequency.value = 880; g.gain.setValueAtTime(.2, c.currentTime); g.gain.exponentialRampToValueAtTime(.001, c.currentTime + .5); o.start(); o.stop(c.currentTime + .5); } catch {}
+}
+</script>
+</body>
+</html>

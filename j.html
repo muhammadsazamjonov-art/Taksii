@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Taksi — admin panel</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="root" style="height:100%"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="/common.js"></script>
+<script>
+const TABS = [['o', 'Umumiy'], ['z', 'Hududlar'], ['r', 'Buyurtmalar'], ['d', 'Haydovchilar'], ['u', 'Yo‘lovchilar']];
+let tab = 'o', map = null, zl = null, dl = null, selMk = null, zones = [], sel = null, timer = null, pend = 0;
+const root = $('root');
+
+if (getAd()) shell(); else login();
+
+function login() {
+  root.innerHTML = `<div class="center"><div class="modal"><div class="brand" style="align-self:flex-start"><span class="lamp"></span>Admin panel</div>
+  <input class="in" id="u" placeholder="Login" autocomplete="username"><input class="in" id="p" type="password" placeholder="Parol" autocomplete="current-password">
+  <button class="btn" id="go">Kirish</button><a href="/" class="mut">← Saytga qaytish</a></div></div>`;
+  const go = async () => { const r = await api('admin/login', 'POST', { u: $('u').value, p: $('p').value }); if (!r.ok) return toast(r.error, 1); setAd(r.data.token); shell(); };
+  $('go').onclick = go; $('p').onkeydown = e => { if (e.key === 'Enter') go(); };
+}
+function shell() {
+  root.innerHTML = `<div class="adm"><header><div class="brand"><span class="lamp"></span>Admin</div><div class="tabs" id="tabs"></div><span class="grow"></span><button class="btn ghost sm" id="lo">Chiqish</button></header><main id="main"></main></div>`;
+  $('lo').onclick = () => { setAd(''); clearInterval(timer); map = null; login(); };
+  go(tab); clearInterval(timer); timer = setInterval(tickLoop, 5000);
+}
+function tabs() { $('tabs').innerHTML = TABS.map(t => `<button class="tab ${t[0] === tab ? 'on' : ''}" data-t="${t[0]}">${t[1]}${t[0] === 'd' && pend ? `<span class="badge">${pend}</span>` : ''}</button>`).join(''); $('tabs').querySelectorAll('button').forEach(b => b.onclick = () => go(b.dataset.t)); }
+async function go(t) { tab = t; map = null; tabs(); const m = $('main'); m.innerHTML = '<p class="mut">Yuklanmoqda…</p>'; await ({ o: vOver, z: vZones, r: vRides, d: vDrivers, u: vUsers })[t](); }
+async function call(path, method, body) { const r = await api(path, method, body, true); if (!r.ok) { if (r.status === 401) { setAd(''); login(); } else toast(r.error, 1); return null; } return r.data; }
+async function tickLoop() {
+  const o = await api('admin/overview', 'GET', null, true); if (o.ok) { pend = o.data.pending; tabs(); }
+  if (tab === 'z') liveDrivers(); else if (tab === 'o') vOver(true); else if (tab === 'r') vRides(true);
+}
+
+/* ---------- Umumiy ---------- */
+async function vOver(quiet) {
+  const o = await call('admin/overview'); if (!o || tab !== 'o') return;
+  const c = [['Faol buyurtmalar', o.active], ['Bugun yakunlangan', o.todayDone], ['Jami buyurtmalar', o.rides], ['Yakunlangan', o.done], ['Bekor qilingan', o.cancelled], ['Onlayn haydovchilar', o.online + ' / ' + o.drivers], ['Tasdiqlanmagan haydovchilar', o.pending], ['Yo‘lovchilar', o.passengers], ['Hududlar', o.zones], ['Aylanma (yakunlangan)', Math.round(o.revenue).toLocaleString('ru-RU')]];
+  $('main').innerHTML = '<div class="grid">' + c.map(x => `<div class="stat"><span class="mut">${x[0]}</span><b>${x[1]}</b></div>`).join('') + '</div><p class="mut">Aylanma turli valyutalar yig‘indisi, faqat taxminiy ko‘rsatkich.</p>';
+}
+
+/* ---------- Hududlar ---------- */
+const blank = () => ({ id: 0, name: '', lat: '', lng: '', r: 20, base: 5000, perKm: 2500, min: 8000, cur: "so'm", active: true });
+async function vZones() {
+  const z = await call('admin/zones'); if (!z || tab !== 'z') return; zones = z; if (!sel) sel = blank();
+  $('main').innerHTML = `<div class="zones"><div class="map" id="zmap" style="border-radius:16px;overflow:hidden;min-height:360px"></div><div class="panel" id="zp"></div></div>`;
+  map = makeMap('zmap'); map.fitBounds(L.latLngBounds(zones.map(x => [x.lat, x.lng])).pad(.3));
+  map.on('click', e => { sel.lat = +e.latlng.lat.toFixed(5); sel.lng = +e.latlng.lng.toFixed(5); fillForm(); mark(); });
+  paintZones(); panel(); mark(); liveDrivers();
+}
+function paintZones() { if (zl) map.removeLayer(zl); zl = drawZones(map, zones, z => { sel = { ...z }; panel(); mark(); map.setView([z.lat, z.lng], Math.max(map.getZoom(), 8)); }); }
+function mark() { if (!map) return; if (selMk) map.removeLayer(selMk); selMk = null; if (sel && sel.lat !== '' && sel.lng !== '') { selMk = L.marker([sel.lat, sel.lng], { icon: pinIcon('b', '+'), draggable: true }).addTo(map); selMk.on('dragend', () => { const l = selMk.getLatLng(); sel.lat = +l.lat.toFixed(5); sel.lng = +l.lng.toFixed(5); fillForm(); }); } }
+function panel() {
+  const s = sel;
+  $('zp').innerHTML = `<div class="between"><h3>${s.id ? 'Hududni tahrirlash' : 'Yangi hudud'}</h3>${s.id ? '<button class="btn ghost sm" id="nw">+ Yangi</button>' : ''}</div>
+  <p class="mut" style="margin:0">Xaritada bosib markazni belgilang (yoki nuqtani sudrang). Sariq doira — hudud chegarasi.</p>
+  <div class="form2">
+   <label class="f full">Nomi<input class="in" id="zn" value="${esc(s.name)}"></label>
+   <label class="f">Kenglik (lat)<input class="in" id="zla" type="number" step="any" value="${esc(s.lat)}"></label>
+   <label class="f">Uzunlik (lng)<input class="in" id="zlo" type="number" step="any" value="${esc(s.lng)}"></label>
+   <label class="f">Radius (km)<input class="in" id="zr" type="number" min="1" value="${esc(s.r)}"></label>
+   <label class="f">Valyuta<input class="in" id="zc" value="${esc(s.cur)}"></label>
+   <label class="f">Boshlang‘ich narx<input class="in" id="zb" type="number" value="${esc(s.base)}"></label>
+   <label class="f">1 km narxi<input class="in" id="zk" type="number" step="any" value="${esc(s.perKm)}"></label>
+   <label class="f">Minimal narx<input class="in" id="zm" type="number" value="${esc(s.min)}"></label>
+   <label class="f" style="justify-content:flex-end;flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="za" ${s.active ? 'checked' : ''}> Faol</label>
+  </div>
+  <div class="row"><button class="btn grow" id="zs">Saqlash</button>${s.id ? '<button class="btn stop" id="zd">O‘chirish</button>' : ''}</div>
+  <h3 style="margin-top:6px">Hududlar (${zones.length})</h3>
+  ${zones.map(z => `<div class="zitem ${z.id === s.id ? 'on' : ''}" data-z="${z.id}"><div><b>${esc(z.name)}</b> ${z.active ? '' : '<span class="pill r">o‘chiq</span>'}<div class="mut">${z.r} km · ${fmt(z.base, z.cur)} + ${fmt(z.perKm, z.cur)}/km</div></div></div>`).join('')}`;
+  $('zp').querySelectorAll('[data-z]').forEach(e => e.onclick = () => { const z = zones.find(x => x.id === +e.dataset.z); sel = { ...z }; panel(); mark(); map.setView([z.lat, z.lng], Math.max(map.getZoom(), 8)); });
+  if ($('nw')) $('nw').onclick = () => { sel = blank(); panel(); mark(); };
+  ['zla', 'zlo'].forEach(id => $(id).oninput = () => { sel.lat = $('zla').value === '' ? '' : +$('zla').value; sel.lng = $('zlo').value === '' ? '' : +$('zlo').value; mark(); });
+  $('zs').onclick = async () => {
+    const b = { name: $('zn').value, lat: $('zla').value, lng: $('zlo').value, r: $('zr').value, cur: $('zc').value || "so'm", base: $('zb').value, perKm: $('zk').value, min: $('zm').value, active: $('za').checked };
+    const r = await call(s.id ? 'admin/zones/' + s.id : 'admin/zones', s.id ? 'PUT' : 'POST', b); if (!r) return;
+    zones = r; toast('Saqlandi'); if (!s.id) sel = blank(); else sel = { ...zones.find(z => z.id === s.id) }; paintZones(); panel(); mark();
+  };
+  if ($('zd')) $('zd').onclick = async () => { if (!confirm(`“${s.name}” hududi o‘chirilsinmi?`)) return; const r = await call('admin/zones/' + s.id, 'DELETE'); if (!r) return; zones = r; sel = blank(); paintZones(); panel(); mark(); };
+}
+function fillForm() { if (!$('zla')) return; $('zla').value = sel.lat; $('zlo').value = sel.lng; }
+async function liveDrivers() {
+  if (!map) return; const u = await call('admin/users'); if (!u || !map) return;
+  if (dl) map.removeLayer(dl); dl = L.layerGroup().addTo(map);
+  u.filter(x => x.role === 'driver' && x.online && x.lat != null && Date.now() - x.seen < 60e3).forEach(x => L.marker([x.lat, x.lng], { icon: carIcon() }).bindTooltip(`${x.name} · ${x.plate}`).addTo(dl));
+}
+
+/* ---------- Buyurtmalar ---------- */
+const stPill = s => `<span class="pill ${s === 'done' ? 'g' : s === 'cancelled' ? 'r' : 'y'}">${STATUS[s]}</span>`;
+async function vRides() {
+  const r = await call('admin/rides'); if (!r || tab !== 'r') return;
+  $('main').innerHTML = `<div class="tw"><table><tr><th>#</th><th>Vaqt</th><th>Hudud</th><th>Yo‘lovchi</th><th>Haydovchi</th><th>Qayerdan → Qayerga</th><th>Narx</th><th>Holat</th><th></th></tr>` +
+    (r.length ? r.map(x => `<tr><td>${x.id}</td><td>${hm(x.t)}</td><td>${esc(x.zone)}</td><td>${x.passenger ? esc(x.passenger.name) + '<div class="mut">' + esc(x.passenger.phone) + '</div>' : '—'}</td><td>${x.driver ? esc(x.driver.name) + '<div class="mut">' + esc(x.driver.plate) + '</div>' : '—'}</td><td style="white-space:normal;min-width:220px">${esc(x.from.addr)} → ${esc(x.to.addr)}<div class="mut">${x.distKm} km</div></td><td>${fmt(x.price, x.cur)}</td><td>${stPill(x.status)}</td><td>${['searching', 'accepted', 'arrived', 'ontrip'].includes(x.status) ? `<button class="btn stop sm" data-c="${x.id}">Bekor</button>` : ''}</td></tr>`).join('') : '<tr><td colspan="9" class="mut">Buyurtmalar yo‘q</td></tr>') + '</table></div>';
+  $('main').querySelectorAll('[data-c]').forEach(b => b.onclick = async () => { if (!confirm('Buyurtma bekor qilinsinmi?')) return; if (await call('admin/rides/' + b.dataset.c + '/cancel', 'POST')) vRides(); });
+}
+
+/* ---------- Haydovchilar va yo'lovchilar ---------- */
+async function vDrivers() { const u = await call('admin/users'); if (!u || tab !== 'd') return; const d = u.filter(x => x.role === 'driver'); pend = d.filter(x => !x.approved && !x.blocked).length; tabs();
+  $('main').innerHTML = `<div class="tw"><table><tr><th>Ism</th><th>Telefon</th><th>Mashina</th><th>Raqam</th><th>Holat</th><th></th></tr>` + (d.length ? d.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.phone)}</td><td>${esc(x.car)}</td><td>${esc(x.plate)}</td><td>${x.blocked ? '<span class="pill r">bloklangan</span>' : x.approved ? (x.online && Date.now() - x.seen < 60e3 ? '<span class="pill g">onlayn</span>' : '<span class="pill">tasdiqlangan</span>') : '<span class="pill y">tasdiq kutmoqda</span>'}</td><td>${x.approved ? `<button class="btn ghost sm" data-a="${x.id}" data-v="0">Tasdiqni olish</button>` : `<button class="btn go sm" data-a="${x.id}" data-v="1">Tasdiqlash</button>`} <button class="btn ${x.blocked ? 'ghost' : 'stop'} sm" data-b="${x.id}" data-v="${x.blocked ? 0 : 1}">${x.blocked ? 'Blokdan chiqarish' : 'Bloklash'}</button></td></tr>`).join('') : '<tr><td colspan="6" class="mut">Haydovchilar yo‘q</td></tr>') + '</table></div>';
+  bindUsers(vDrivers); }
+async function vUsers() { const u = await call('admin/users'); if (!u || tab !== 'u') return; const d = u.filter(x => x.role === 'passenger');
+  $('main').innerHTML = `<div class="tw"><table><tr><th>Ism</th><th>Telefon</th><th>Ro‘yxatdan o‘tgan</th><th>Holat</th><th></th></tr>` + (d.length ? d.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.phone)}</td><td>${hm(x.created)}</td><td>${x.blocked ? '<span class="pill r">bloklangan</span>' : '<span class="pill g">faol</span>'}</td><td><button class="btn ${x.blocked ? 'ghost' : 'stop'} sm" data-b="${x.id}" data-v="${x.blocked ? 0 : 1}">${x.blocked ? 'Blokdan chiqarish' : 'Bloklash'}</button></td></tr>`).join('') : '<tr><td colspan="5" class="mut">Yo‘lovchilar yo‘q</td></tr>') + '</table></div>';
+  bindUsers(vUsers); }
+function bindUsers(reload) {
+  $('main').querySelectorAll('[data-a]').forEach(b => b.onclick = async () => { if (await call('admin/users/' + b.dataset.a, 'POST', { approved: b.dataset.v === '1' })) reload(); });
+  $('main').querySelectorAll('[data-b]').forEach(b => b.onclick = async () => { if (await call('admin/users/' + b.dataset.b, 'POST', { blocked: b.dataset.v === '1' })) reload(); });
+}
+</script>
+</body>
+</html>
